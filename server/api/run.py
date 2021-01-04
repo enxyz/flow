@@ -2,6 +2,9 @@ import copy
 from flask import abort, request
 from flask_restx import Resource, fields, Namespace
 
+from werkzeug import secure_filename
+from werkzeug.datastructures import FileStorage
+
 from functools import reduce, wraps
 
 from server import app, db
@@ -12,6 +15,15 @@ from api.utils import change_allowed, success_output, add_owner, add_updator, ru
 
 
 api = Namespace('runs', description='Extra-Simple operations on runs.', path='/')
+
+
+upload_parser = api.parser()
+upload_parser.add_argument(
+    'file',
+    location='files',
+    type=FileStorage,
+    required=True
+)
 
 
 run_input = api.model('RunInput', {})
@@ -28,6 +40,11 @@ samples_output = api.model('SamplesOutput', {
     'page': fields.Integer(),
     'pageCount': fields.Integer(),
 })
+attachment_output = api.model('AttachmentOutput', {
+    'id': fields.Integer(),
+    'name': fields.String(),
+})
+attachments_output = fields.List(fields.Nested(attachment_output))
 
 
 def run_to_dict(run, run_version):
@@ -441,8 +458,10 @@ class RunSampleResource(Resource):
     @api.doc(security='token', model=sample_output, params={'version_id': version_id_param})
     @requires_auth
     @requires_scope('read:runs')
-    @requires_access()
     def get(self, run_id, sample_id):
+        if not check_access(path=f"/run/{str(run_id)}", method="GET"):
+            abort(403)
+            return
         run = Run.query.get(run_id)
         if not run or run.is_deleted:
             abort(404)
@@ -454,7 +473,6 @@ class RunSampleResource(Resource):
     @api.doc(security='token', model=sample_output, body=sample_input)
     @requires_auth
     @requires_scope('write:runs')
-    @requires_access()
     def put(self, run_id, sample_id):
         sample_dict = request.json
         # This field shouldn't be updated by users.
@@ -473,3 +491,105 @@ class RunSampleResource(Resource):
         db.session.add(sample_version)
         db.session.commit()
         return run_to_sample(sample)
+
+
+# Attachments -----------------------------------------------------------------
+
+@api.route('/run/<int:run_id>/attachment')
+class RunAttachmentsResource(Resource):
+    @api.doc(security='token', model=attachments_output)
+    @requires_auth
+    @requires_scope('read:runs')
+    def get(self):
+        if not check_access(path=f"/run/{str(run_id)}", method="GET"):
+            abort(403)
+            return
+        run = Run.query.get(run_id)
+        if not run or run.is_deleted:
+            abort(404)
+            return
+
+        return [
+            {
+                'id': attachment.id,
+                'name': attachment.name,
+            }
+            for attachment
+            in run.attachments
+            if check_access(path=f"/run/{str(run.id)}", method="GET") and attachment
+        ]
+
+    @api.doc(security='token', model=attachment_output, body=attachment_input)
+    @requires_auth
+    @requires_scope('write:runs')
+    def post(self):
+        if not check_access(path=f"/run/{str(run_id)}", method="GET"):
+            abort(403)
+            return
+        run = Run.query.get(run_id)
+        if not run or run.is_deleted:
+            abort(404)
+            return
+
+        args = upload_parser.parse_args()
+        uploaded_file = args['file']
+
+        attachment = Attachment(
+            name=secure_filename(uploaded_file.filename),
+            mimetype=uploaded_file.content_type,
+            data=uploaded_file.read(),
+        )
+
+        db.session.add(attachment)
+        db.session.commit()
+        return success_output
+
+
+@api.route('/run/<int:run_id>/attachment/<int:attachment_id>')
+@api.doc(params={'attachment_id': attachment_id_param})
+class RunAttachmentResource(Resource):
+    @api.doc(security='token', model=attachment_output, params={'version_id': version_id_param})
+    @requires_auth
+    @requires_scope('read:runs')
+    @requires_access()
+    def get(self, run_id, attachment_id):
+        if not check_access(path=f"/run/{str(run_id)}", method="GET"):
+            abort(403)
+            return
+        run = Run.query.get(run_id)
+        if not run or run.is_deleted:
+            abort(404)
+            return
+
+        attachment = Attachment.query.get(attachment_id)
+        if not attachment or attachment.is_deleted:
+            abort(404)
+            return
+
+        return app.response_class(attachment.data, mimetype=attachment.mimetype if attachment.mimetype else 'application/octet-stream')
+
+    @api.doc(security='token', model=success_output, params={'purge': purge_param})
+    @requires_auth
+    @requires_scope('write:runs')
+    @requires_access()
+    def delete(self, attachment_id):
+        if not check_access(path=f"/run/{str(run_id)}", method="GET"):
+            abort(403)
+            return
+        run = Run.query.get(run_id)
+        if not run or run.is_deleted:
+            abort(404)
+            return
+
+        purge = request.args.get('purge') == 'true' if request.args.get('purge') else False
+
+        attachment = Attachment.query.get(attachment_id)
+        if not attachment or attachment.is_deleted:
+            abort(404)
+            return
+        if purge:
+            db.session.delete(attachment)
+        else:
+            attachment.is_deleted = True
+        db.session.commit()
+        return success_output
