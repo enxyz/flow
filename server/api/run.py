@@ -2,8 +2,8 @@ import copy
 from flask import abort, request
 from flask_restx import Resource, fields, Namespace
 
-from werkzeug import secure_filename
 from werkzeug.datastructures import FileStorage
+from werkzeug.utils import secure_filename
 
 from functools import reduce, wraps
 
@@ -519,7 +519,7 @@ class RunAttachmentsResource(Resource):
             if check_access(path=f"/run/{str(run.id)}", method="GET") and attachment
         ]
 
-    @api.doc(security='token', model=attachment_output, body=attachment_input)
+    @api.doc(security='token', model=attachment_output)
     @requires_auth
     @requires_scope('write:runs')
     def post(self):
